@@ -1,0 +1,43 @@
+{
+  "id": "user-management",
+  "name": "User Management",
+  "author": {
+    "name": "Beekeeper Studio",
+    "url": "https://www.beekeeperstudio.io"
+  },
+  "description": "View, create, edit and delete database users and roles, manage their privileges, and find out why someone can or can't access something.",
+  "version": "0.1.0",
+  "icon": "manage_accounts",
+  "manifestVersion": 1,
+  "minAppVersion": "5.5.0",
+  "capabilities": {
+    "views": [
+      {
+        "id": "user-management",
+        "name": "Users & Roles",
+        "type": "base-tab",
+        "entry": "dist/index.html"
+      }
+    ],
+    "menu": [
+      {
+        "command": "manage-users",
+        "name": "Users & Roles",
+        "view": "user-management",
+        "placement": ["menubar.tools", "newTabDropdown"]
+      },
+      {
+        "command": "table-access",
+        "name": "Who Can Access This?",
+        "view": "user-management",
+        "placement": "entity.table.context"
+      },
+      {
+        "command": "schema-access",
+        "name": "Who Can Access This?",
+        "view": "user-management",
+        "placement": "entity.schema.context"
+      }
+    ]
+  }
+}

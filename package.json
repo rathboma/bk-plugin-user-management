@@ -1,0 +1,41 @@
+{
+  "name": "bk-plugin-user-management",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Beekeeper Studio plugin to view, edit and debug database users, roles and privileges",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rathboma/bk-plugin-user-management"
+  },
+  "author": {
+    "name": "Matthew Rathbone",
+    "url": "https://beekeeperstudio.io"
+  },
+  "scripts": {
+    "dev": "vite",
+    "harness": "vite --config vite.harness.config.ts",
+    "build": "vue-tsc --noEmit && vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "package": "node scripts/package.mjs"
+  },
+  "dependencies": {
+    "@beekeeperstudio/plugin": "^1.7.2",
+    "vue": "^3.5"
+  },
+  "devDependencies": {
+    "@beekeeperstudio/vite-plugin": "^1.1.0",
+    "@types/node": "^22",
+    "@types/pg": "^8.23.1",
+    "@vitejs/plugin-vue": "^6",
+    "happy-dom": "^21.0.1",
+    "pg": "^8.23.1",
+    "typescript": "~5.9.3",
+    "vite": "^7",
+    "vitest": "^5",
+    "vue-tsc": "^3"
+  }
+}
