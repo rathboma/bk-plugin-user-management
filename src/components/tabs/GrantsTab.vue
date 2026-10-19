@@ -1,16 +1,21 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { reachableRoles } from "../../core/graph";
 import { objectLabel } from "../../core/objects";
-import type { DefaultGrant, GrantEntry, GrantChange } from "../../engines/types";
+import type { DefaultGrant, GrantChange, GrantEntry } from "../../engines/types";
 import { useManager } from "../../state/inject";
+import EntityIcon from "../EntityIcon.vue";
 import Icon from "../Icon.vue";
+import PrincipalLink from "../PrincipalLink.vue";
 
 const m = useManager();
 const { state } = m;
 const principal = m.selectedPrincipal;
+const publicId = computed(() => m.caps.value?.publicGrantee?.id);
 
 function typeLabel(type: string, subtype?: string) {
-  return subtype ?? m.caps.value?.objectTypes.find((t) => t.id === type)?.label.toLowerCase() ?? type;
+  if (subtype && subtype !== "system") return subtype;
+  return m.caps.value?.objectTypes.find((t) => t.id === type)?.label.toLowerCase() ?? type;
 }
 
 const grantGroups = computed(() => {
@@ -26,17 +31,27 @@ const grantGroups = computed(() => {
 });
 
 function defaultGroups(list: DefaultGrant[]) {
-  const groups = new Map<string, { first: DefaultGrant; privileges: string[] }>();
+  const groups = new Map<string, { first: DefaultGrant; privileges: { id: string; grantable: boolean }[] }>();
   for (const d of list) {
     const key = JSON.stringify([d.owner, d.schema ?? null, d.objectType, d.grantee]);
     if (!groups.has(key)) groups.set(key, { first: d, privileges: [] });
-    groups.get(key)!.privileges.push(d.privilege + (d.grantable ? "*" : ""));
+    groups.get(key)!.privileges.push({ id: d.privilege, grantable: d.grantable });
   }
   return [...groups.values()];
 }
 
 const receivedDefaults = computed(() => defaultGroups((state.detail?.defaultGrants ?? []).filter((d) => d.grantee === principal.value?.name)));
 const givenDefaults = computed(() => defaultGroups((state.detail?.defaultGrants ?? []).filter((d) => d.owner === principal.value?.name)));
+
+/** Roles whose privileges it uses, for the empty state. */
+const throughRoles = computed(() => {
+  if (!principal.value) return [];
+  const reach = reachableRoles(principal.value.name, state.memberships, {
+    inherits: (x) => x.options.inherit !== false,
+    settable: (x) => x.options.set !== false,
+  });
+  return [...reach.values()].filter((r) => r.inherited).map((r) => r.role);
+});
 
 function pluralType(type: string) {
   return m.caps.value?.objectTypes.find((t) => t.id === type)?.plural.toLowerCase() ?? type;
@@ -54,7 +69,7 @@ function revoke(group: (typeof grantGroups.value)[number]) {
   m.review(engine.planGrants([change], server));
 }
 
-function revokeDefault(group: { first: DefaultGrant; privileges: string[] }) {
+function revokeDefault(group: ReturnType<typeof defaultGroups>[number]) {
   const { engine, server } = m.need();
   const d = group.first;
   m.review(
@@ -63,7 +78,7 @@ function revokeDefault(group: { first: DefaultGrant; privileges: string[] }) {
         {
           action: "revoke",
           target: { kind: "default", objectType: d.objectType, schema: d.schema, owner: d.owner },
-          privileges: group.privileges.map((p) => p.replace(/\*$/, "")),
+          privileges: group.privileges.map((p) => p.id),
           grantee: d.grantee,
         },
       ],
@@ -72,9 +87,9 @@ function revokeDefault(group: { first: DefaultGrant; privileges: string[] }) {
   );
 }
 
-function check(group: (typeof grantGroups.value)[number]) {
+function explain(group: (typeof grantGroups.value)[number]) {
   if (!principal.value) return;
-  m.ask(principal.value.name, { object: group.first.object, privilege: group.privileges[0].id });
+  void m.ask(principal.value.name, { object: group.first.object, privilege: group.privileges[0].id });
 }
 </script>
 
@@ -82,120 +97,171 @@ function check(group: (typeof grantGroups.value)[number]) {
   <div>
     <section class="section">
       <div class="section-head">
-        <h3>Granted directly <span class="count">{{ grantGroups.length }}</span></h3>
-        <span class="hint">in {{ state.server?.database }}. Privileges through roles and PUBLIC are under Effective access.</span>
-        <div class="grow" />
-        <button class="btn" @click="m.openDialog({ type: 'grant', grantee: principal?.name })">
-          <Icon name="plus" :size="14" /> Grant
+        <span class="title">Granted directly</span>
+        <span class="pill">{{ grantGroups.length }}</span>
+        <span class="hint">
+          In {{ state.server?.database }}. Everything {{ principal?.name }} can do, through roles and PUBLIC too, is under
+          <button class="link" @click="m.setTab('access')">Access</button>.
+        </span>
+        <button class="btn" :disabled="m.readOnly.value" @click="m.openDialog({ type: 'grant', grantee: principal?.name })">
+          <Icon name="add" />Grant
         </button>
       </div>
       <div v-if="state.detailLoading && !state.detail" class="spinner" />
-      <div v-else-if="!grantGroups.length" class="empty-note">No privileges granted directly to {{ principal?.name }}.</div>
-      <div v-else class="table-wrap">
+      <div v-else-if="!grantGroups.length" class="box empty">
+        <div class="lead">Nothing is granted directly to {{ principal?.name }}.</div>
+        <div class="sub">
+          Everything {{ principal?.name }} can do comes through
+          <template v-for="(role, i) in throughRoles" :key="role">
+            <button class="link quiet" @click="m.select(role)">{{ role }}</button>{{ i < throughRoles.length - 1 ? ", " : "" }}
+          </template>
+          <template v-if="throughRoles.length"> and </template>PUBLIC. See
+          <button class="link quiet" @click="m.setTab('access')">Access</button> for the full picture.
+        </div>
+      </div>
+      <div v-else class="box">
         <table class="table">
           <thead>
             <tr>
               <th>Object</th>
-              <th>Type</th>
-              <th>Privileges</th>
-              <th>Granted by</th>
-              <th />
+              <th style="width: 110px">Type</th>
+              <th style="width: 280px">Privileges</th>
+              <th style="width: 150px">Granted by</th>
+              <th style="width: 170px" />
             </tr>
           </thead>
           <tbody>
             <tr v-for="group in grantGroups" :key="JSON.stringify([group.first.object, group.first.column])">
-              <td class="mono">
-                {{ objectLabel(group.first.object) }}<span v-if="group.first.column" class="muted"> ({{ group.first.column }})</span>
-              </td>
-              <td class="muted nowrap">{{ group.first.column ? "column" : typeLabel(group.first.object.type, group.first.object.subtype) }}</td>
               <td>
-                <span class="row wrap privs">
-                  <span
+                <span class="entity obj">
+                  <EntityIcon :type="group.first.column ? 'column' : group.first.object.type" :subtype="group.first.object.subtype" />
+                  {{ objectLabel(group.first.object) }}<span v-if="group.first.column" class="sub">({{ group.first.column }})</span>
+                </span>
+              </td>
+              <td class="nowrap">{{ group.first.column ? "column" : typeLabel(group.first.object.type, group.first.object.subtype) }}</td>
+              <td>
+                <span class="privs">
+                  <code
                     v-for="p in group.privileges"
                     :key="p.id"
-                    class="badge"
-                    :class="{ info: p.grantable }"
-                    :title="p.grantable ? 'With grant option' : undefined"
-                    >{{ p.id }}{{ p.grantable ? "*" : "" }}</span
+                    class="inline-code"
+                    :title="p.grantable ? 'With grant option: can grant it to others' : undefined"
+                    >{{ p.id }}{{ p.grantable ? "*" : "" }}</code
                   >
                 </span>
               </td>
-              <td class="muted">{{ [...group.grantors].join(", ") }}</td>
+              <td>{{ [...group.grantors].join(", ") }}</td>
               <td class="actions">
-                <button class="btn ghost icon-only" title="Explain access" @click="check(group)"><Icon name="bug" :size="14" /></button>
-                <button class="btn ghost" title="Revoke these privileges" @click="revoke(group)">Revoke</button>
+                <button class="btn quiet small" title="Open in Debug" @click="explain(group)"><Icon name="bug" />Explain</button>
+                <button class="btn small" :disabled="m.readOnly.value" title="Revoke these privileges" @click="revoke(group)">Revoke</button>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
-      <p v-if="grantGroups.some((g) => g.privileges.some((p) => p.grantable))" class="hint">* with grant option: can grant it to others.</p>
+      <p v-if="grantGroups.some((g) => g.privileges.some((p) => p.grantable))" class="section-foot">
+        * with grant option: can grant it to others.
+      </p>
     </section>
 
     <section class="section">
       <div class="section-head">
-        <h3>Default privileges it receives <span class="count">{{ receivedDefaults.length }}</span></h3>
+        <span class="title">Default privileges it receives</span>
+        <span class="pill">{{ receivedDefaults.length }}</span>
         <span class="hint">Granted automatically on objects created later</span>
-        <div class="grow" />
-        <button class="btn" @click="m.openDialog({ type: 'grant', grantee: principal?.name, target: 'default' })">
-          <Icon name="plus" :size="14" /> Add default
+        <button
+          class="btn"
+          :disabled="m.readOnly.value"
+          @click="m.openDialog({ type: 'grant', grantee: principal?.name, target: 'default' })"
+        >
+          <Icon name="add" />Add default
         </button>
       </div>
-      <div v-if="!receivedDefaults.length" class="empty-note">
-        No default privileges are granted to {{ principal?.name }} directly.
+      <div v-if="!receivedDefaults.length" class="empty-line">None.</div>
+      <div v-else class="box">
+        <div v-for="d in receivedDefaults" :key="JSON.stringify(d.first)" class="default-row">
+          <code v-for="p in d.privileges" :key="p.id" class="inline-code">{{ p.id }}{{ p.grantable ? "*" : "" }}</code>
+          <span class="muted">on {{ pluralType(d.first.objectType) }} created by</span>
+          <PrincipalLink :name="d.first.owner" />
+          <template v-if="d.first.schema">
+            <span class="muted">in schema</span>
+            <span class="entity obj"><EntityIcon type="schema" />{{ d.first.schema }}</span>
+          </template>
+          <span v-else class="muted">in any schema</span>
+          <span class="grow" />
+          <button class="btn small" :disabled="m.readOnly.value" @click="revokeDefault(d)">Revoke</button>
+        </div>
       </div>
-      <ul v-else class="defaults">
-        <li v-for="d in receivedDefaults" :key="JSON.stringify(d.first)">
-          <span class="grow">
-            <strong>{{ d.privileges.join(", ") }}</strong> on {{ pluralType(d.first.objectType) }} created by
-            <button class="link" @click="m.select(d.first.owner)">{{ d.first.owner }}</button>
-            {{ d.first.schema ? `in schema ${d.first.schema}` : "in any schema" }}
-          </span>
-          <button class="btn ghost" @click="revokeDefault(d)">Revoke</button>
-        </li>
-      </ul>
     </section>
 
-    <section v-if="givenDefaults.length" class="section">
-      <div class="section-head">
-        <h3>Default privileges for objects it creates <span class="count">{{ givenDefaults.length }}</span></h3>
+    <section class="section">
+      <div v-if="!givenDefaults.length" class="section-foot">
+        Default privileges for objects {{ principal?.name }} creates: none.
       </div>
-      <ul class="defaults">
-        <li v-for="d in givenDefaults" :key="JSON.stringify(d.first)">
-          <span class="grow">
-            <strong>{{ d.privileges.join(", ") }}</strong> on {{ pluralType(d.first.objectType) }}
-            {{ d.first.schema ? `in schema ${d.first.schema}` : "in any schema" }} to
-            <button v-if="d.first.grantee !== 'public'" class="link" @click="m.select(d.first.grantee)">{{ d.first.grantee }}</button>
-            <span v-else>PUBLIC</span>
-          </span>
-          <button class="btn ghost" @click="revokeDefault(d)">Revoke</button>
-        </li>
-      </ul>
+      <template v-else>
+        <div class="section-head">
+          <span class="title">Default privileges for objects it creates</span>
+          <span class="pill">{{ givenDefaults.length }}</span>
+        </div>
+        <div class="box">
+          <div v-for="d in givenDefaults" :key="JSON.stringify(d.first)" class="default-row">
+            <code v-for="p in d.privileges" :key="p.id" class="inline-code">{{ p.id }}{{ p.grantable ? "*" : "" }}</code>
+            <span class="muted">on {{ pluralType(d.first.objectType) }}</span>
+            <template v-if="d.first.schema">
+              <span class="muted">in schema</span>
+              <span class="entity obj"><EntityIcon type="schema" />{{ d.first.schema }}</span>
+            </template>
+            <span v-else class="muted">in any schema</span>
+            <span class="muted">to</span>
+            <span v-if="d.first.grantee === publicId" class="entity">PUBLIC</span>
+            <PrincipalLink v-else :name="d.first.grantee" />
+            <span class="grow" />
+            <button class="btn small" :disabled="m.readOnly.value" @click="revokeDefault(d)">Revoke</button>
+          </div>
+        </div>
+      </template>
     </section>
   </div>
 </template>
 
 <style scoped>
+.section-head .hint {
+  font-size: 12.5px;
+}
+.section-head .hint .link {
+  color: var(--text-dark);
+}
+.table td:first-child {
+  color: var(--text-dark);
+}
 .privs {
+  display: inline-flex;
+  flex-wrap: wrap;
   gap: 4px;
 }
-.defaults {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius);
-  background: var(--raised);
+.inline-code {
+  padding: 2px 6px;
 }
-.defaults li {
+.default-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px 6px 12px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
-  font-size: 0.8125rem;
+  height: 38px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+  color: var(--text-dark);
 }
-.defaults li:last-child {
+.default-row:last-child {
   border-bottom: 0;
+}
+.default-row:hover {
+  background: var(--tint-1);
+}
+.default-row .muted {
+  color: var(--text);
+}
+.section-foot {
+  font-size: 12.5px;
 }
 </style>

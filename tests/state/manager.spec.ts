@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createManager, type SavedViewState } from "../../src/state/manager";
 import type { Host } from "../../src/host/host";
 import type { LaunchInput } from "../../src/host/launch";
-import type { ChangePlan, Principal, ServerInfo, UserManagementEngine } from "../../src/engines/types";
+import type { ChangePlan, MembershipChange, Principal, ServerInfo, UserManagementEngine } from "../../src/engines/types";
 
 const server: ServerInfo = {
   version: 170000,
@@ -26,7 +26,9 @@ const principal = (name: string, kind = "user", system = false): Principal => ({
   badges: [],
 });
 
-function setup(options: { readOnly?: boolean; saved?: SavedViewState; context?: unknown; failApply?: string } = {}) {
+function setup(
+  options: { readOnly?: boolean; saved?: SavedViewState; context?: unknown; failApply?: string; confirm?: boolean } = {}
+) {
   let principals = [principal("admin"), principal("alice"), principal("readers", "role"), principal("pg_monitor", "role", true)];
   const executed: ChangePlan[] = [];
   const engine = {
@@ -46,6 +48,11 @@ function setup(options: { readOnly?: boolean; saved?: SavedViewState; context?: 
       settings: [],
       sessions: [],
     })),
+    planMemberships: vi.fn((changes: MembershipChange[]) => ({
+      title: "Change memberships",
+      statements: changes.map((c) => ({ sql: c.action === "update" ? `GRANT ${c.membership.role} TO ${c.membership.member} WITH ADMIN OPTION` : "" })),
+      warnings: [],
+    })),
     execute: vi.fn(async (_run: unknown, plan: ChangePlan) => {
       if (options.failApply) throw new Error(options.failApply);
       executed.push(plan);
@@ -63,6 +70,7 @@ function setup(options: { readOnly?: boolean; saved?: SavedViewState; context?: 
     setTitle: vi.fn(async () => undefined),
     notifySuccess: vi.fn(async () => undefined),
     notifyError: vi.fn(async () => undefined),
+    confirm: vi.fn(async () => options.confirm ?? true),
   } as unknown as Host;
 
   const manager = createManager(host, (type) => (type === "fake" ? engine : undefined));
@@ -144,9 +152,77 @@ describe("manager", () => {
   it("asks an access question in the Debug tab", async () => {
     const { manager } = setup();
     await manager.init(launch({ kind: "manage" }));
-    manager.ask("alice", { object: { type: "table", schema: "app", name: "orders" }, privilege: "SELECT" });
+    manager.setDebugMode("login");
+    await manager.ask("alice", { object: { type: "table", schema: "app", name: "orders" }, privilege: "SELECT" });
     expect(manager.state.selected).toBe("alice");
     expect(manager.state.tab).toBe("debug");
+    expect(manager.state.debugMode).toBe("access");
     expect(manager.state.question?.privilege).toBe("SELECT");
+  });
+
+  it("reads the Access tab's old saved name", async () => {
+    const { manager } = setup({
+      saved: { version: 1, view: "principals", selected: "alice", tab: "effective" as never, showSystem: false },
+    });
+    await manager.init(launch({ kind: "manage" }));
+    expect(manager.state.tab).toBe("access");
+  });
+
+  it("queues membership edits until they are reviewed", async () => {
+    const { manager, executed } = setup();
+    await manager.init(launch({ kind: "manage" }));
+    await manager.select("alice");
+    const membership = manager.state.memberships[0];
+
+    manager.queueMembership(membership, "admin", true);
+    expect(manager.state.pending).toHaveLength(1);
+    expect(manager.state.pendingFor).toBe("alice");
+    expect(manager.pendingOption(membership, "admin")).toBe(true);
+    expect(manager.pendingOption(membership, "inherit")).toBeUndefined();
+
+    // Ticking it back leaves nothing to apply.
+    manager.queueMembership(membership, "admin", false);
+    expect(manager.state.pending).toHaveLength(0);
+    expect(manager.pendingPlan()).toBeUndefined();
+
+    manager.queueMembership(membership, "admin", true);
+    expect(manager.pendingPlan()?.statements[0].sql).toBe("GRANT readers TO alice WITH ADMIN OPTION");
+    manager.reviewPending();
+    expect(manager.state.review?.fromPending).toBe(true);
+    await manager.apply();
+    expect(executed).toHaveLength(1);
+    expect(manager.state.pending).toHaveLength(0);
+    expect(manager.state.pendingFor).toBeUndefined();
+  });
+
+  it("drops queued edits that another change already made", async () => {
+    const { manager, engine } = setup();
+    await manager.init(launch({ kind: "manage" }));
+    await manager.select("alice");
+    manager.queueMembership(manager.state.memberships[0], "admin", true);
+    vi.mocked(engine.listMemberships).mockResolvedValue([{ role: "readers", member: "alice", options: { admin: true } }]);
+    manager.review({ title: "Make alice an admin", statements: [{ sql: "GRANT readers TO alice WITH ADMIN OPTION" }], warnings: [] });
+    await manager.apply();
+    expect(manager.state.pending).toHaveLength(0);
+    expect(manager.state.pendingFor).toBeUndefined();
+  });
+
+  it("asks before leaving pending edits behind", async () => {
+    const kept = setup({ confirm: false });
+    await kept.manager.init(launch({ kind: "manage" }));
+    await kept.manager.select("alice");
+    kept.manager.queueMembership(kept.manager.state.memberships[0], "admin", true);
+    await kept.manager.select("admin");
+    expect(kept.host.confirm).toHaveBeenCalledOnce();
+    expect(kept.manager.state.selected).toBe("alice");
+    expect(kept.manager.state.pending).toHaveLength(1);
+
+    const discarded = setup({ confirm: true });
+    await discarded.manager.init(launch({ kind: "manage" }));
+    await discarded.manager.select("alice");
+    discarded.manager.queueMembership(discarded.manager.state.memberships[0], "admin", true);
+    await discarded.manager.select("admin");
+    expect(discarded.manager.state.selected).toBe("admin");
+    expect(discarded.manager.state.pending).toHaveLength(0);
   });
 });

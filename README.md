@@ -12,11 +12,12 @@ out why someone can or can't access something.
 - **Create, edit, rename, duplicate and drop**, with passwords hashed in the
   plugin so the plain text never reaches the server or its logs.
 - **Memberships** in both directions, with PostgreSQL 16's ADMIN, INHERIT and
-  SET options, and every role a user belongs to indirectly.
-- **Grants** on any object, on everything in a schema, and default privileges
-  for objects created later.
-- **Effective access:** a matrix of what a role can actually do, coloured by
-  where each privilege comes from.
+  SET options, and every role a user belongs to indirectly. Ticking an option
+  queues it as a pending change, like a cell edit in a table tab.
+- **Direct grants** on any object, on everything in a schema, and default
+  privileges for objects created later.
+- **Access:** a grid of what a role can actually do, with a letter for where
+  each privilege comes from.
 - **Who can access this?** Every role's privileges on one table, view, schema,
   sequence, function or database.
 - **Debug:** "Can bob INSERT on app.orders?" answered with the reason, every
@@ -32,11 +33,11 @@ opened in a query tab instead.
 
 ## Supported databases
 
-| Database   | Users & roles | Grants & defaults | Effective access & debugging | Login check |
-| ---------- | ------------- | ----------------- | ---------------------------- | ----------- |
-| PostgreSQL | Yes           | Yes               | Yes                          | Yes         |
-| MySQL      | Planned       |                   |                              |             |
-| SQL Server | Planned       |                   |                              |             |
+| Database   | Users & roles | Grants & defaults | Access & debugging | Login check |
+| ---------- | ------------- | ----------------- | ------------------ | ----------- |
+| PostgreSQL | Yes           | Yes               | Yes                | Yes         |
+| MySQL      | Planned       |                   |                    |             |
+| SQL Server | Planned       |                   |                    |             |
 
 Tested with PostgreSQL 12, 16 and 18. The plugin is built around a
 database-neutral model, so each database only needs an adapter (see
@@ -49,17 +50,21 @@ database-neutral model, so each database only needs an adapter (see
   **Who Can Access This?**
 
 The tab opens on the role you are connected as. Pick a user or role on the left
-to see its details.
+to see its details. The **Overview** shows its attributes, memberships and
+everything it owns, with who else has privileges on each object.
 
-### Effective access
+![Overview of app_owner: a group role that owns the app and reporting schemas](docs/screenshot-overview.png)
 
-What a role can do on every table, schema, database, sequence or function,
-whether it was granted directly, through a role it belongs to, to PUBLIC, by
-owning the object, or by a predefined role such as `pg_read_all_data`. A dashed
-circle means the privilege is only available after `SET ROLE`. Click a cell for
-the full explanation.
+### Access
 
-![Effective access for alice: SELECT on most tables, through her analysts role](docs/screenshot-effective.png)
+What a role can do on every table, schema, database, sequence or function. Each
+privilege is a letter for where it comes from: **D** granted directly, **R**
+through a role it belongs to, **O** owner, **P** PUBLIC, **B** a built-in role
+such as `pg_read_all_data`, **S** superuser. A dashed letter means the privilege
+is only available after `SET ROLE`, and a dash means no access. Click a letter
+to open Debug with the question filled in.
+
+![Access for alice: SELECT on the app tables, through a role](docs/screenshot-access.png)
 
 Whether a role holds a privilege always comes from PostgreSQL's own
 `has_table_privilege()` family of functions, so the answer is never a guess. The
@@ -69,10 +74,13 @@ plugin then works out the reason from the object's ACL and the membership graph.
 
 ![Every role's privileges on app.orders, in the light theme](docs/screenshot-who-can-access.png)
 
+Also opened from **Who can access…** on any object in a role's Overview.
+
 ### Debug
 
-Pick a privilege and an object. Besides the privilege itself, the check looks
-at everything else access depends on:
+The **Access check** reads as a question: "Can bob INSERT on table or view
+app.orders?" The answer says where the privilege comes from and, besides the
+privilege itself, checks everything else access depends on:
 
 - `USAGE` on the schema and `CONNECT` on the database
 - memberships without `INHERIT`, where the privilege only works after `SET ROLE`
@@ -80,17 +88,20 @@ at everything else access depends on:
 - column grants, when only some columns are allowed
 
 Each failing check offers the statements that fix it, which open for review.
+The **Explain** button in Direct grants and the letters in Access open the same
+check.
 
-The **Login check** explains why a user can or can't connect:
+The **Login check** explains why a user can or can't connect, with the
+matching `pg_hba.conf` rules grouped under one row:
 
 ![Login check for carol: the password has expired](docs/screenshot-login-check.png)
 
 Reading password state and `pg_hba.conf` rules needs a superuser. Other checks
 work for any role.
 
-### Grants and default privileges
+### Direct grants and default privileges
 
-![Grants for app_readers, with a default privilege for tables app_owner creates](docs/screenshot-grants.png)
+![Direct grants for app_readers, with a default privilege for tables app_owner creates](docs/screenshot-grants.png)
 
 **Grant** gives privileges on one object (optionally just some columns), on
 everything in a schema, or on objects created later (default privileges). The
@@ -99,7 +110,11 @@ change, so new tables don't get missed.
 
 ### Memberships
 
-![service_api's memberships, with ADMIN, INHERIT and SET options](docs/screenshot-memberships.png)
+![analysts' memberships, with a pending change to give alice ADMIN](docs/screenshot-memberships.png)
+
+Ticking ADMIN, INHERIT or SET queues the change. The bar at the bottom shows
+the pending statements, and **Review & apply** sends them all to one review.
+Switching to another user or role asks before discarding them.
 
 ### Reviewing changes
 

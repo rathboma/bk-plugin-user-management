@@ -58,7 +58,7 @@ function toggle(value: string, on: boolean) {
   display: flex;
   flex-direction: column;
   gap: 5px;
-  background: var(--canvas);
+  background: transparent;
 }
 .items .check {
   align-items: center;

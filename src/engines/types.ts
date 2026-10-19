@@ -261,6 +261,28 @@ export interface Check {
   detail?: string;
   /** Statements that fix the problem, offered as a button. */
   fix?: ChangePlan;
+  /** Rows grouped under the check, e.g. the login rules that match. */
+  children?: CheckChild[];
+  /** What the secondary children are, for the link that shows them, e.g. "replication rules". */
+  secondaryLabel?: string;
+}
+
+export interface CheckChild {
+  /** Short reference, e.g. "line 117". */
+  label: string;
+  text: string;
+  /** Hidden behind a "show more" link. */
+  secondary?: boolean;
+}
+
+export interface LoginDiagnosis {
+  /** "unknown" when the checks that decide it couldn't be read. */
+  verdict: "yes" | "no" | "unknown";
+  summary: string;
+  checks: Check[];
+  fixes: ChangePlan[];
+  /** Setting a new password would help, e.g. it expired or is missing. */
+  suggestPassword: boolean;
 }
 
 export interface AccessCheckRequest {
@@ -304,11 +326,19 @@ export interface Session {
   query?: string;
 }
 
+/** An object the principal owns, with who else can use it. */
+export interface OwnedObject extends ObjectRef {
+  /** Privileges other principals (or PUBLIC) hold on it. */
+  grants: { grantee: string; privileges: string[] }[];
+  /** Row level security policies on it. */
+  policies: number;
+}
+
 export interface PrincipalDetail {
   principal: Principal;
   grants: GrantEntry[];
   defaultGrants: DefaultGrant[];
-  owned: ObjectRef[];
+  owned: OwnedObject[];
   ownedTruncated: boolean;
   settings: SettingEntry[];
   sessions: Session[];
@@ -358,6 +388,8 @@ export interface Capabilities {
   rename: boolean;
   memberships: { supported: boolean; options: MembershipOptionDef[] };
   objectTypes: ObjectTypeDef[];
+  /** Parameter names offered when adding a setting. */
+  settingSuggestions?: string[];
   /** The pseudo-principal meaning everyone, e.g. PostgreSQL's PUBLIC. */
   publicGrantee?: { id: string; label: string };
   settings: boolean;
@@ -415,7 +447,7 @@ export interface UserManagementEngine {
   ): Promise<EffectivePrivileges>;
   objectAccess(run: RunQuery, server: ServerInfo, ctx: AccessContext, object: ObjectRef): Promise<ObjectAccess>;
   checkAccess(run: RunQuery, server: ServerInfo, ctx: AccessContext, request: AccessCheckRequest): Promise<AccessCheckResult>;
-  diagnoseLogin(run: RunQuery, server: ServerInfo, ctx: AccessContext, principal: Principal): Promise<Check[]>;
+  diagnoseLogin(run: RunQuery, server: ServerInfo, ctx: AccessContext, principal: Principal): Promise<LoginDiagnosis>;
   dropInfo(run: RunQuery, server: ServerInfo, principal: Principal): Promise<DropInfo>;
 
   planCreate(draft: PrincipalDraft, server: ServerInfo): Promise<ChangePlan>;

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import { fromDateTimeInput, toDateTimeInput } from "../../core/format";
 import type { AttributeDef, AttributeValue, KindDef, PasswordChange, PrincipalDraft } from "../../engines/types";
 import { errorMessage } from "../../host/host";
@@ -13,6 +13,8 @@ const caps = m.caps.value!;
 const dialog = m.state.dialog!;
 const editing = dialog.type === "edit";
 const before = editing ? m.selectedPrincipal.value : undefined;
+/** Opened to set a new password, e.g. from the login check. */
+const forPassword = dialog.type === "edit" && dialog.password === true;
 
 function defaultsFor(kind: KindDef | undefined): Record<string, AttributeValue> {
   const values: Record<string, AttributeValue> = {};
@@ -26,10 +28,15 @@ const form = reactive({
   kind: initialKind,
   attributes: before ? { ...before.attributes } : defaultsFor(caps.kinds.find((k) => k.id === initialKind)),
   comment: before?.comment ?? "",
-  passwordAction: (editing ? "keep" : "set") as PasswordChange["action"],
+  passwordAction: (editing && !forPassword ? "keep" : "set") as PasswordChange["action"],
   password: "",
   confirm: "",
   memberOf: [] as string[],
+});
+const passwordInput = ref<HTMLInputElement>();
+// Runs after the dialog focuses its first field.
+onMounted(() => {
+  if (forPassword) passwordInput.value?.focus();
 });
 const submitting = ref(false);
 const error = ref("");
@@ -167,7 +174,7 @@ const title = editing
           <button type="button" :class="{ active: form.passwordAction === 'remove' }" @click="form.passwordAction = 'remove'">Remove</button>
         </div>
         <div v-if="form.passwordAction === 'set'" class="row wrap">
-          <input v-model="form.password" class="input grow" type="password" placeholder="Password" autocomplete="new-password" aria-label="Password" />
+          <input ref="passwordInput" v-model="form.password" class="input grow" type="password" placeholder="Password" autocomplete="new-password" aria-label="Password" />
           <input v-model="form.confirm" class="input grow" type="password" placeholder="Confirm" autocomplete="new-password" aria-label="Confirm password" />
         </div>
         <div v-if="form.passwordAction === 'remove'" class="hint">Password logins stop working.</div>

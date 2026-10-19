@@ -34,7 +34,7 @@ onMounted(start);
     </div>
 
     <div v-else-if="state.status !== 'ready'" class="empty">
-      <Icon name="role" :size="40" class="empty-icon" />
+      <Icon name="manage_accounts" :size="40" class="empty-icon" />
       <template v-if="state.status === 'unsupported'">
         <h1>{{ databaseName(state.connection?.databaseType) }} isn't supported yet</h1>
         <p>User Management supports {{ supportedDatabaseNames() }}. More databases are planned.</p>
@@ -47,7 +47,7 @@ onMounted(start);
         <h1>Couldn't load users and roles</h1>
         <p class="mono error-text">{{ state.error }}</p>
         <button class="btn" @click="start">
-          <Icon name="refresh" /> Try again
+          <Icon name="refresh" />Try again
         </button>
       </template>
     </div>
@@ -61,7 +61,7 @@ onMounted(start);
             :aria-selected="state.view === 'principals'"
             @click="m.select(state.selected)"
           >
-            <Icon name="role" :size="14" /> Users &amp; roles
+            <Icon name="group" /> Users &amp; roles
           </button>
           <button
             role="tab"
@@ -69,30 +69,26 @@ onMounted(start);
             :aria-selected="state.view === 'object'"
             @click="m.showObject(undefined)"
           >
-            <Icon name="table" :size="14" /> Who can access…
+            <Icon name="grid_on" /> Who can access…
           </button>
         </div>
         <div class="grow" />
-        <div class="server" :title="`Connected to ${state.server?.database} as ${state.server?.currentUser}`">
-          <Icon name="database" :size="14" />
-          <span>{{ state.server?.versionLabel }}</span>
-          <span class="muted">·</span>
-          <span>{{ state.server?.database }}</span>
-          <span class="muted">as</span>
-          <strong>{{ state.server?.currentUser }}</strong>
-          <span v-if="state.server?.isSuperuser" class="badge danger">Superuser</span>
-        </div>
-        <button class="btn ghost icon-only" title="Refresh" :disabled="state.loadingList" @click="m.refresh()">
+        <span class="server" :title="`Connected to ${state.server?.database} as ${state.server?.currentUser}`">
+          <Icon name="storage" :size="14" />{{ state.server?.versionLabel }} · {{ state.server?.database }}
+        </span>
+        <span class="server">as <span class="strong">{{ state.server?.currentUser }}</span></span>
+        <span v-if="state.server?.isSuperuser" class="tag danger">superuser</span>
+        <button class="btn quiet icon-only" title="Refresh" :disabled="state.loadingList" @click="m.refresh()">
           <Icon name="refresh" />
         </button>
       </header>
 
       <div v-if="m.readOnly.value" class="banner notice warning">
-        <Icon name="lock" :size="14" />
+        <Icon name="lock" />
         <span>Read-only connection. Changes can be reviewed and copied, but not applied here.</span>
       </div>
       <div v-else-if="state.server && !state.server.canManagePrincipals" class="banner notice">
-        <Icon name="info" :size="14" />
+        <Icon name="info" />
         <span>
           {{ state.server.currentUser }} has neither SUPERUSER nor CREATEROLE, so creating and changing roles will fail.
           Granting privileges on objects it owns still works.
@@ -153,17 +149,18 @@ onMounted(start);
 .topbar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border-color);
-  min-height: 44px;
+  gap: 8px;
+  height: 38px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line-soft);
+  flex: none;
 }
 .server {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 5px;
-  font-size: 0.75rem;
-  color: var(--text);
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-light);
   white-space: nowrap;
   overflow: hidden;
 }
@@ -181,9 +178,8 @@ onMounted(start);
   display: flex;
   flex-direction: column;
 }
-@media (max-width: 720px) {
-  .server span:not(:first-of-type),
-  .server strong {
+@media (max-width: 760px) {
+  .server {
     display: none;
   }
 }

@@ -110,7 +110,7 @@ describe("describeSource", () => {
       "Granted to readers, through analysts → readers"
     );
     expect(describeSource({ kind: "inherited", grantee: "writers", via: ["bob", "writers"], needsSetRole: true })).toBe(
-      "Granted to writers (only after SET ROLE)"
+      "Granted to writers, usable only after SET ROLE"
     );
     expect(describeSource({ kind: "public" })).toMatch(/PUBLIC/);
     expect(describeSource({ kind: "owner", via: ["alice"] })).toBe("Owns the object");

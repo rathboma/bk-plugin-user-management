@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { reachableRoles } from "../../src/core/graph";
+import { maskBits, shortTimestamp } from "../../src/engines/postgres/debug";
 import { effectiveMemberships, explainPrivilege, predefinedRolesFor } from "../../src/engines/postgres/privileges";
 import type { Membership, ServerInfo } from "../../src/engines/types";
 
@@ -89,5 +90,22 @@ describe("explainPrivilege", () => {
   it("makes the database owner a member of pg_database_owner on 14+", () => {
     expect(effectiveMemberships([], server(140000))).toEqual([expect.objectContaining({ role: "pg_database_owner", member: "app_owner" })]);
     expect(effectiveMemberships([], server(130000))).toEqual([]);
+  });
+});
+
+describe("login check formatting", () => {
+  it("writes netmasks as prefix lengths", () => {
+    expect(maskBits("255.255.255.255")).toBe(32);
+    expect(maskBits("255.255.255.0")).toBe(24);
+    expect(maskBits("0.0.0.0")).toBe(0);
+    expect(maskBits("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")).toBe(128);
+    expect(maskBits("ffff:ffff:ffff:ffff::")).toBe(64);
+    expect(maskBits("255.0.255.0")).toBeUndefined();
+  });
+
+  it("shortens timestamps", () => {
+    expect(shortTimestamp("2024-01-01 00:00:00+00")).toBe("2024-01-01 00:00 UTC");
+    expect(shortTimestamp("2026-10-17 09:14:02.123-05")).toBe("2026-10-17 09:14 -05");
+    expect(shortTimestamp("infinity")).toBe("infinity");
   });
 });

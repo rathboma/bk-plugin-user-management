@@ -77,6 +77,7 @@ RESET ROLE;
 ALTER ROLE alice SET search_path = reporting, app, public;
 ALTER ROLE alice SET statement_timeout = '30s';
 ALTER ROLE service_api SET idle_in_transaction_session_timeout = '60s';
+ALTER ROLE app_readers SET statement_timeout = '15s';
 
 INSERT INTO app.customers (name, email) VALUES ('Ann', 'ann@example.com'), ('Ben', 'ben@example.com');
 INSERT INTO app.orders (customer_id, status, total) VALUES (1, 'open', 120), (2, 'paid', 80);

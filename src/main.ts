@@ -5,6 +5,7 @@ import { createApp } from "vue";
 import App from "./App.vue";
 import { host } from "./host/host";
 import { applyTheme } from "./host/theme";
+import "material-icons/iconfont/filled.css";
 import "./styles/app.css";
 
 void host.appInfo().then((info) => applyTheme(info?.theme));

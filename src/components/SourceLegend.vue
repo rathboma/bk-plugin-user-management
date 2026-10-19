@@ -1,11 +1,12 @@
 <template>
   <div class="legend" aria-label="Legend">
-    <span class="src-direct"><i />Granted directly</span>
-    <span class="src-inherited"><i />Through a role</span>
-    <span class="src-owner"><i />Owner</span>
-    <span class="src-public"><i />PUBLIC</span>
-    <span class="src-predefined"><i />Predefined role</span>
-    <span class="src-superuser"><i />Superuser</span>
-    <span><i class="setrole" />After SET ROLE</span>
+    <span class="item"><span class="chip small src-direct">D</span>Direct</span>
+    <span class="item"><span class="chip small src-inherited">R</span>Through a role</span>
+    <span class="item"><span class="chip small src-owner">O</span>Owner</span>
+    <span class="item"><span class="chip small src-public">P</span>PUBLIC</span>
+    <span class="item"><span class="chip small src-predefined">B</span>Built-in role</span>
+    <span class="item"><span class="chip small src-superuser">S</span>Superuser</span>
+    <span class="item"><span class="chip small src-inherited setrole">R</span>After SET ROLE</span>
+    <span class="item"><span class="chip small none">–</span>No access</span>
   </div>
 </template>

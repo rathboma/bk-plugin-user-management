@@ -29,7 +29,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
       <Icon name="warning" :size="14" />
       <span>{{ w }}</span>
     </div>
-    <div v-if="!plan.statements.length" class="empty-note">Nothing to change.</div>
+    <div v-if="!plan.statements.length" class="empty-line">Nothing to change.</div>
     <template v-else>
       <div class="hint">
         {{ plan.statements.length === 1 ? "Runs" : `${plan.statements.length} statements run` }}

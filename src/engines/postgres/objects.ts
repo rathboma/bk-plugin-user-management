@@ -97,11 +97,14 @@ const SOURCES: Record<string, ObjectSource> = {
     defaultsCode: "T",
   },
   schema: {
+    // PostgreSQL's own schemas are listed too, marked as system, because
+    // every role uses them through PUBLIC.
     select: () => `
-      SELECT n.oid, NULL::text AS schema, n.nspname AS name, NULL::text AS signature, 'schema' AS subtype,
+      SELECT n.oid, NULL::text AS schema, n.nspname AS name, NULL::text AS signature,
+        CASE WHEN n.nspname IN ('pg_catalog', 'information_schema') THEN 'system' ELSE 'schema' END AS subtype,
         n.nspowner AS owner, coalesce(n.nspacl, acldefault('n', n.nspowner)) AS acl
       FROM pg_namespace n
-      WHERE ${userSchemaFilter("n.nspname")}`,
+      WHERE n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp\\_%'`,
     hasPrivilege: "has_schema_privilege",
     keyword: () => "SCHEMA",
     defaultsKeyword: "SCHEMAS",

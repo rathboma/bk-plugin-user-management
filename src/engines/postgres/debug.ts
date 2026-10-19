@@ -12,6 +12,7 @@ import type {
   ChangePlan,
   Check,
   DropInfo,
+  LoginDiagnosis,
   ObjectAccess,
   ObjectRef,
   Principal,
@@ -146,11 +147,23 @@ export async function objectAccess(run: RunQuery, server: ServerInfo, ctx: Acces
   return { ...access, notes };
 }
 
-function summarize(principal: string, privilege: string, label: string, cell: PrivilegeCell, blocked: Check[]): string {
-  if (cell.allowed && !blocked.length) return `${principal} can ${privilege} on ${label}.`;
-  if (cell.allowed) return `${principal} has ${privilege} on ${label}, but ${blocked.map((c) => c.label.toLowerCase()).join(" and ")} is missing.`;
-  if (cell.sources.length) return `${principal} can only ${privilege} on ${label} after SET ROLE.`;
-  return `${principal} can't ${privilege} on ${label}.`;
+function summarize(principal: string, privilege: string, label: string, cell: PrivilegeCell, checks: Check[]): string {
+  const blocked = checks.filter((c) => c.status === "fail" && c.id !== "privilege");
+  if (cell.allowed && !blocked.length) {
+    const rls = checks.some((c) => c.id === "rls" && c.status === "warn");
+    const rows = privilege === "INSERT" ? " Row level security rejects every new row." : " Row level security hides every row from it.";
+    return `${principal} can ${privilege} on ${label}.${rls ? rows : ""}`;
+  }
+  if (cell.allowed) return `${principal} has ${privilege} on ${label}, but ${blocked.map((c) => c.label).join(" and ")} is missing.`;
+  const noSchema = blocked.some((c) => c.id === "schema") ? ", and can't see the schema at all" : "";
+  const viaRole = cell.sources.find((s) => s.via && s.via.length > 1)?.via?.[1];
+  if (cell.sources.length) return `${principal} can only ${privilege} on ${label} after SET ROLE${viaRole ? ` ${viaRole}` : ""}${noSchema}.`;
+  return `${principal} can't ${privilege} on ${label}${noSchema}.`;
+}
+
+/** "app.orders" for tables and views, "schema app" or "function f(integer)" for the rest. */
+function objectPhrase(type: { id: string; label: string }, label: string): string {
+  return type.id === "table" ? label : `${type.label.toLowerCase().split(" or ")[0]} ${label}`;
 }
 
 export async function checkAccess(
@@ -176,7 +189,7 @@ export async function checkAccess(
 
   checks.push({
     id: "privilege",
-    label: `${privilege} on ${type.label.toLowerCase()} ${label}`,
+    label: `${privilege} on ${objectPhrase(type, label)}`,
     status: cell.allowed ? "ok" : cell.sources.length ? "warn" : "fail",
     detail: cell.sources.length ? cell.sources.map(describeSource).join("\n") : `No grant gives ${principal} ${privilege}.`,
     fix: cell.allowed ? undefined : grantFix(object, [privilege]),
@@ -212,15 +225,6 @@ export async function checkAccess(
     fix: connect ? undefined : grantFix({ type: "database", name: server.database }, ["CONNECT"]),
   });
 
-  if (role && !role.attributes.login) {
-    checks.push({
-      id: "login",
-      label: "Logging in",
-      status: "info",
-      detail: `${principal} can't log in itself. Users get its privileges by being members of it.`,
-    });
-  }
-
   if (object.type === "table") {
     const tf = await tableFacts(run, object);
     if (tf) {
@@ -253,9 +257,9 @@ export async function checkAccess(
     const membership = ctx.memberships.find((m) => m.member === principal && m.role === viaRole);
     checks.push({
       id: "set-role",
-      label: "Membership doesn't inherit",
+      label: `Membership in ${viaRole} doesn't inherit`,
       status: "warn",
-      detail: `${principal} belongs to ${viaRole} without INHERIT, so it has to run SET ROLE ${viaRole} first.`,
+      detail: `${principal} has to run SET ROLE ${viaRole} before the role's privileges apply.`,
       fix:
         server.version >= PG16 && membership
           ? {
@@ -288,7 +292,7 @@ export async function checkAccess(
       });
     }
   }
-  return { allowed, summary: summarize(principal, privilege, label, cell, blocked), cell, checks, fixes };
+  return { allowed, summary: summarize(principal, privilege, label, cell, checks), cell, checks, fixes };
 }
 
 interface HbaRule {
@@ -316,13 +320,58 @@ function hbaUserMatch(entry: string, principal: string, groups: Set<string>): bo
   return false;
 }
 
-function describeRule(rule: HbaRule): string {
-  const address = rule.address ? ` ${rule.address}${rule.netmask ? `/${rule.netmask}` : ""}` : "";
-  return `${rule.type} ${rule.database.join(",")} ${rule.users.join(",")}${address} ${rule.method ?? ""}`.trim();
+/** "2024-01-01 00:00 UTC" from PostgreSQL's "2024-01-01 00:00:00+00". */
+export function shortTimestamp(value: string | undefined): string {
+  const match = value?.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?([+-]\d{2}(?::?\d{2})?)?$/);
+  if (!match) return value ?? "";
+  const [, date, time, offset] = match;
+  const zone = !offset ? "" : /^[+-]00(:?00)?$/.test(offset) ? " UTC" : ` ${offset}`;
+  return `${date} ${time}${zone}`;
 }
 
-export async function diagnoseLogin(run: RunQuery, server: ServerInfo, ctx: AccessContext, principal: Principal): Promise<Check[]> {
-  const name = quoteLiteral(principal.name);
+/** Prefix length of a netmask, e.g. 24 for 255.255.255.0; undefined when it isn't one. */
+export function maskBits(netmask: string): number | undefined {
+  let groups: number[];
+  let width: number;
+  if (netmask.includes(".")) {
+    groups = netmask.split(".").map(Number);
+    width = 8;
+    if (groups.length !== 4) return undefined;
+  } else {
+    const [head, tail] = netmask.split("::");
+    const parse = (part: string | undefined) => (part ? part.split(":").map((g) => parseInt(g, 16)) : []);
+    const left = parse(head);
+    const right = parse(tail);
+    const fill = netmask.includes("::") ? 8 - left.length - right.length : 0;
+    groups = [...left, ...Array(Math.max(0, fill)).fill(0), ...right];
+    width = 16;
+    if (groups.length !== 8) return undefined;
+  }
+  const bits = groups.map((g) => g.toString(2).padStart(width, "0")).join("");
+  if (groups.some((g) => Number.isNaN(g)) || /01/.test(bits)) return undefined;
+  return bits.indexOf("0") === -1 ? bits.length : bits.indexOf("0");
+}
+
+function describeRule(rule: HbaRule): string {
+  const bits = rule.netmask ? maskBits(rule.netmask) : undefined;
+  const address = rule.address ? `${rule.address}${rule.netmask ? `/${bits ?? rule.netmask}` : ""}` : "";
+  return [rule.type, rule.database.join(","), rule.users.join(","), address, rule.method ?? ""].filter(Boolean).join("  ");
+}
+
+const SEVERITY: Record<Check["status"], number> = { fail: 4, warn: 3, unknown: 2, info: 1, ok: 0 };
+
+function worst(statuses: Check["status"][]): Check["status"] {
+  return statuses.reduce((a, b) => (SEVERITY[b] > SEVERITY[a] ? b : a), "ok" as Check["status"]);
+}
+
+export async function diagnoseLogin(
+  run: RunQuery,
+  server: ServerInfo,
+  ctx: AccessContext,
+  principal: Principal
+): Promise<LoginDiagnosis> {
+  const name = principal.name;
+  const literal = quoteLiteral(name);
   const [[role], databases] = await Promise.all([
     rows(
       run,
@@ -333,27 +382,27 @@ export async function diagnoseLogin(run: RunQuery, server: ServerInfo, ctx: Acce
          (SELECT count(*) FROM pg_stat_activity a WHERE a.usesysid = r.oid) AS sessions,
          current_setting('max_connections')::int AS max_connections,
          (SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend') AS total_sessions
-       FROM pg_roles r WHERE r.rolname = ${name}`
+       FROM pg_roles r WHERE r.rolname = ${literal}`
     ),
     rows(
       run,
       `SELECT d.datname AS name, d.datallowconn AS allow, d.datconnlimit AS connection_limit,
-         has_database_privilege(${name}::name, d.oid, 'CONNECT') AS connect
+         has_database_privilege(${literal}::name, d.oid, 'CONNECT') AS connect
        FROM pg_database d WHERE NOT d.datistemplate ORDER BY d.datname`
     ),
   ]);
-  if (!role) throw new Error(`Role ${principal.name} not found.`);
+  if (!role) throw new Error(`Role ${name} not found.`);
   const checks: Check[] = [];
   const alterRole = (title: string, sql: string): ChangePlan => ({ title, statements: [{ sql }], warnings: [] });
-  const quoted = quoteIdent(principal.name);
+  const quoted = quoteIdent(name);
 
   const login = bool(role.login);
   checks.push({
     id: "login",
     label: "LOGIN attribute",
     status: login ? "ok" : "fail",
-    detail: login ? undefined : `${principal.name} is a role without LOGIN, so it can't log in.`,
-    fix: login ? undefined : alterRole(`Let ${principal.name} log in`, `ALTER ROLE ${quoted} LOGIN`),
+    detail: login ? `${name} can log in.` : `${name} is a role without LOGIN, so it can't log in.`,
+    fix: login ? undefined : alterRole(`Let ${name} log in`, `ALTER ROLE ${quoted} LOGIN`),
   });
 
   const expired = bool(role.expired);
@@ -363,11 +412,11 @@ export async function diagnoseLogin(run: RunQuery, server: ServerInfo, ctx: Acce
     label: "Password expiry",
     status: expired ? "fail" : bool(role.expires_soon) ? "warn" : "ok",
     detail: expired
-      ? `The password expired at ${validUntil}. Password logins fail; other methods (certificates, peer) still work.`
+      ? `Expired ${shortTimestamp(validUntil)}. Password logins fail; certificate and peer logins still work.`
       : validUntil && validUntil !== "infinity"
-        ? `Expires at ${validUntil}.`
+        ? `Expires ${shortTimestamp(validUntil)}.`
         : "Never expires.",
-    fix: expired ? alterRole(`Remove the expiry of ${principal.name}`, `ALTER ROLE ${quoted} VALID UNTIL 'infinity'`) : undefined,
+    fix: expired ? alterRole("Remove the expiry", `ALTER ROLE ${quoted} VALID UNTIL 'infinity'`) : undefined,
   });
 
   const state = principal.passwordState;
@@ -378,7 +427,7 @@ export async function diagnoseLogin(run: RunQuery, server: ServerInfo, ctx: Acce
       id: "password",
       label: "Password",
       status: "warn",
-      detail: "No password is set. Password authentication always fails; trust, peer and certificate logins can still work.",
+      detail: "No password is set. Password logins always fail; trust, peer and certificate logins can still work.",
     });
   } else {
     checks.push({
@@ -394,26 +443,24 @@ export async function diagnoseLogin(run: RunQuery, server: ServerInfo, ctx: Acce
 
   const limit = num(role.connection_limit) ?? -1;
   const sessions = num(role.sessions) ?? 0;
+  const maxConnections = num(role.max_connections) ?? 0;
+  const total = num(role.total_sessions) ?? 0;
+  const roleFull = limit >= 0 && sessions >= limit;
+  const serverFull = maxConnections > 0 && total >= maxConnections;
   checks.push({
     id: "connections",
     label: "Connection limit",
-    status: limit >= 0 && sessions >= limit ? "fail" : limit >= 0 && sessions >= limit * 0.8 ? "warn" : "ok",
+    status:
+      roleFull || serverFull
+        ? "fail"
+        : (limit >= 0 && sessions >= limit * 0.8) || (maxConnections > 0 && total >= maxConnections * 0.9)
+          ? "warn"
+          : "ok",
     detail:
-      limit < 0
-        ? `No limit. ${plural(sessions, "session")} open.`
-        : `${sessions} of ${limit} connections in use.${sessions >= limit ? " New connections are refused." : ""}`,
+      (limit < 0 ? `No limit. ${plural(sessions, "session")} open.` : `${sessions} of ${limit} connections in use.`) +
+      (maxConnections ? ` Server limit ${maxConnections}, ${total} in use.` : "") +
+      (roleFull || serverFull ? " New connections are refused." : ""),
   });
-
-  const maxConnections = num(role.max_connections) ?? 0;
-  const total = num(role.total_sessions) ?? 0;
-  if (maxConnections && total >= maxConnections * 0.9) {
-    checks.push({
-      id: "server-connections",
-      label: "Server connections",
-      status: total >= maxConnections ? "fail" : "warn",
-      detail: `${total} of ${maxConnections} server connections (max_connections) in use.`,
-    });
-  }
 
   const allowed = databases.filter((d) => bool(d.connect) && bool(d.allow));
   const denied = databases.filter((d) => !bool(d.connect));
@@ -426,10 +473,13 @@ export async function diagnoseLogin(run: RunQuery, server: ServerInfo, ctx: Acce
       : "No CONNECT privilege on any database.",
     fix:
       !allowed.length || denied.some((d) => d.name === server.database)
-        ? planGrants(
-            [{ action: "grant", target: { kind: "object", object: { type: "database", name: server.database } }, privileges: ["CONNECT"], grantee: principal.name }],
-            server
-          )
+        ? {
+            ...planGrants(
+              [{ action: "grant", target: { kind: "object", object: { type: "database", name: server.database } }, privileges: ["CONNECT"], grantee: name }],
+              server
+            ),
+            title: `Grant CONNECT on ${server.database}`,
+          }
         : undefined,
   });
   for (const d of databases.filter((d) => !bool(d.allow))) {
@@ -437,10 +487,48 @@ export async function diagnoseLogin(run: RunQuery, server: ServerInfo, ctx: Acce
   }
 
   checks.push(...(await hbaChecks(run, server, ctx, principal)));
-  return checks;
+
+  const fails = checks.filter((c) => c.status === "fail");
+  const reason = (c: Check): string => {
+    switch (c.id) {
+      case "login":
+        return `${name} can't log in: it doesn't have LOGIN.`;
+      case "expiry":
+        return `Password logins fail: the password expired on ${(validUntil ?? "").slice(0, 10)}. Certificate and peer logins still work.`;
+      case "databases":
+        return `${name} has no CONNECT privilege on any database.`;
+      default:
+        return c.detail ?? `${c.label} blocks it.`;
+    }
+  };
+  const warnings = checks.filter((c) => c.status === "warn").length;
+  const hbaUnknown = checks.some((c) => c.id === "hba" && c.status === "unknown");
+  let verdict: LoginDiagnosis["verdict"];
+  let summary: string;
+  if (fails.length) {
+    verdict = "no";
+    summary = reason(fails[0]) + (fails.length > 1 ? ` ${plural(fails.length - 1, "more problem")} below.` : "");
+  } else if (hbaUnknown) {
+    verdict = "unknown";
+    summary = "Nothing checked here blocks it, but the pg_hba.conf rules that decide the connection need a superuser to read.";
+  } else {
+    verdict = "yes";
+    summary = `Nothing blocks ${name} from logging in.${warnings ? ` ${plural(warnings, "warning")} below.` : ""}`;
+  }
+  return {
+    verdict,
+    summary,
+    checks,
+    fixes: fails.map((c) => c.fix).filter((f): f is ChangePlan => !!f),
+    suggestPassword:
+      expired ||
+      state === "none" ||
+      (state === "md5" && checks.some((c) => c.id === "hba" && c.detail?.includes("SCRAM"))),
+  };
 }
 
 async function hbaChecks(run: RunQuery, server: ServerInfo, ctx: AccessContext, principal: Principal): Promise<Check[]> {
+  const name = principal.name;
   let list: Record<string, unknown>[];
   try {
     list = await rows(
@@ -457,7 +545,7 @@ async function hbaChecks(run: RunQuery, server: ServerInfo, ctx: AccessContext, 
         status: "unknown",
         detail: server.isSuperuser
           ? "pg_hba_file_rules isn't available on this server."
-          : "Only superusers can read pg_hba.conf rules (pg_hba_file_rules).",
+          : "Only superusers can read the pg_hba.conf rules.",
       },
     ];
   }
@@ -478,10 +566,10 @@ async function hbaChecks(run: RunQuery, server: ServerInfo, ctx: AccessContext, 
   }
 
   // "+group" matches any membership, inherited or not.
-  const groups = new Set(reachableRoles(principal.name, ctx.memberships).keys());
+  const groups = new Set(reachableRoles(name, ctx.memberships).keys());
   const matching = rules
     .filter((r) => !r.error)
-    .map((rule) => ({ rule, match: rule.users.map((u) => hbaUserMatch(u, principal.name, groups)) }))
+    .map((rule) => ({ rule, match: rule.users.map((u) => hbaUserMatch(u, name, groups)) }))
     .filter(({ match }) => match.some((m) => m !== false));
 
   if (!matching.length) {
@@ -489,45 +577,61 @@ async function hbaChecks(run: RunQuery, server: ServerInfo, ctx: AccessContext, 
       id: "hba",
       label: "pg_hba.conf",
       status: "fail",
-      detail: `No rule matches ${principal.name}, so every connection attempt is rejected.`,
+      detail: `No rule matches ${name}, so every connection attempt is rejected.`,
     });
     return checks;
   }
 
   const state = principal.passwordState;
   const needsPassword = (method?: string) => ["password", "md5", "scram-sha-256"].includes(method ?? "");
-  for (const { rule, match } of matching.slice(0, 8)) {
-    const uncertain = !match.includes(true);
+  const problems: string[] = [];
+  const statuses = matching.map(({ rule, match }) => {
     let status: Check["status"] = "ok";
-    let detail = describeRule(rule);
     if (rule.method === "reject") {
       status = "fail";
-      detail += ". Rejects these connections.";
+      problems.push(`Line ${rule.line} rejects ${rule.type} connections.`);
     } else if (rule.method === "trust") {
       status = "warn";
-      detail += ". No password needed.";
     } else if (needsPassword(rule.method) && state === "none") {
       status = "fail";
-      detail += ". Needs a password, and none is set.";
+      problems.push(`Line ${rule.line} needs a password, and none is set.`);
     } else if (rule.method === "scram-sha-256" && state === "md5") {
       status = "fail";
-      detail += ". Needs a SCRAM password; the stored one is MD5.";
-    } else if (rule.method === "peer" || rule.method === "ident") {
-      status = "info";
-      detail += ". The operating system user must match (or be mapped).";
+      problems.push(`Line ${rule.line} needs a SCRAM password; the stored one is MD5.`);
     }
-    if (uncertain) {
-      detail += " Matches through a file (@) reference that can't be checked here.";
-      if (status === "ok") status = "info";
-    }
-    checks.push({ id: `hba-${rule.line}`, label: `pg_hba.conf line ${rule.line}`, status, detail });
+    if (!match.includes(true) && status === "ok") status = "info";
+    return status;
+  });
+
+  const methods = [...new Set(matching.map(({ rule }) => rule.method ?? "unknown"))];
+  const count = matching.length;
+  let detail: string;
+  if (methods.length === 1) {
+    const method = methods[0];
+    const all = count === 1 ? "It uses" : count === 2 ? "Both use" : `All ${count} use`;
+    detail =
+      method === "trust"
+        ? `${all} trust, so no password is asked on these connections.`
+        : method === "reject"
+          ? `${all} reject, so these connections are refused.`
+          : `${all} ${method}.`;
+  } else {
+    const counts = methods.map((m) => `${matching.filter(({ rule }) => (rule.method ?? "unknown") === m).length} ${m}`);
+    detail = `${counts.join(", ")}. The first rule matching the connection decides.`;
   }
+  if (problems.length) detail = `${problems.join(" ")} ${detail}`;
+
   checks.push({
-    id: "hba-order",
-    label: "Rule order",
-    status: "info",
-    detail:
-      "The first rule matching the connection type, database, user and address decides. pg_hba_file_rules shows the file on disk, which may not be loaded yet (SELECT pg_reload_conf()).",
+    id: "hba",
+    label: `pg_hba.conf · ${plural(count, "rule")} ${count === 1 ? "matches" : "match"} ${name}`,
+    status: worst(statuses),
+    detail,
+    children: matching.map(({ rule }) => ({
+      label: `line ${rule.line}`,
+      text: describeRule(rule),
+      secondary: rule.database.length > 0 && rule.database.every((d) => d === "replication"),
+    })),
+    secondaryLabel: "replication rules",
   });
   return checks;
 }

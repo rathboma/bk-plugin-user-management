@@ -5,6 +5,7 @@ import type {
   Capabilities,
   ChangePlan,
   Membership,
+  MembershipChange,
   ObjectRef,
   Principal,
   PrincipalDetail,
@@ -14,12 +15,15 @@ import type {
 import { errorMessage, type ConnectionInfo, type Host } from "../host/host";
 import type { LaunchInput } from "../host/launch";
 
-export type DetailTab = "overview" | "memberships" | "grants" | "effective" | "settings" | "sessions" | "debug";
+export type DetailTab = "overview" | "debug" | "memberships" | "grants" | "access" | "settings" | "sessions";
+export type DebugMode = "access" | "login";
+
+const TABS: DetailTab[] = ["overview", "debug", "memberships", "grants", "access", "settings", "sessions"];
 export type View = "principals" | "object";
 
 export type Dialog =
   | { type: "create"; kind: string }
-  | { type: "edit" }
+  | { type: "edit"; password?: boolean }
   | { type: "duplicate" }
   | { type: "drop" }
   | { type: "script" }
@@ -46,7 +50,17 @@ export interface Review {
   plan: ChangePlan;
   running: boolean;
   error: string;
+  /** Applying it settles the pending membership edits. */
+  fromPending?: boolean;
 }
+
+/** A membership option edit waiting for review, like a cell edit in a table tab. */
+export interface PendingMembership {
+  membership: Membership;
+  options: Record<string, boolean>;
+}
+
+const membershipKey = (m: Membership) => JSON.stringify([m.role, m.member, m.grantor ?? null]);
 
 export function createManager(
   host: Host,
@@ -72,6 +86,10 @@ export function createManager(
     dialog: undefined as Dialog | undefined,
     review: undefined as Review | undefined,
     question: undefined as AccessQuestion | undefined,
+    debugMode: "access" as DebugMode,
+    /** Membership edits made on this principal and not applied yet. */
+    pending: [] as PendingMembership[],
+    pendingFor: undefined as string | undefined,
     /** Bumped after every applied change, so panels reload what they show. */
     revision: 0,
   });
@@ -170,7 +188,9 @@ export function createManager(
 
       if (saved?.version === 1) {
         state.showSystem = saved.showSystem;
-        state.tab = saved.tab;
+        // "effective" is the Access tab's old name.
+        const tab = (saved.tab as string) === "effective" ? "access" : saved.tab;
+        state.tab = TABS.includes(tab) ? tab : "overview";
         if (saved.selected && state.principals.some((p) => p.id === saved.selected)) state.selected = saved.selected;
         state.view = saved.view;
         state.object = saved.object;
@@ -205,6 +225,15 @@ export function createManager(
   }
 
   async function select(id: string | undefined) {
+    if (id !== state.selected && state.pending.length) {
+      const discard = await host.confirm(
+        "Discard pending changes?",
+        `${state.pending.length === 1 ? "1 membership change" : `${state.pending.length} membership changes`} for ${state.pendingFor} haven't been applied.`,
+        "Discard"
+      );
+      if (discard === false) return;
+      discardPending();
+    }
     state.view = "principals";
     if (id === state.selected && state.detail) return;
     state.selected = id;
@@ -233,10 +262,66 @@ export function createManager(
   }
 
   /** Opens the Debug tab with an access question filled in. */
-  function ask(principal: string, question: AccessQuestion) {
-    void select(principal);
+  async function ask(principal: string, question: AccessQuestion) {
+    await select(principal);
+    if (state.selected !== principal) return;
     state.question = question;
+    state.debugMode = "access";
     setTab("debug");
+  }
+
+  function setDebugMode(mode: DebugMode) {
+    state.debugMode = mode;
+  }
+
+  /** Queues a membership option change; changing it back drops it from the queue. */
+  function queueMembership(membership: Membership, option: string, value: boolean) {
+    if (state.pendingFor && state.pendingFor !== state.selected) discardPending();
+    state.pendingFor = state.selected;
+    const key = membershipKey(membership);
+    const existing = state.pending.find((p) => membershipKey(p.membership) === key);
+    const options = { ...(existing?.options ?? membership.options), [option]: value };
+    const unchanged = Object.keys(options).every((k) => (options[k] ?? false) === (membership.options[k] ?? false));
+    state.pending = state.pending.filter((p) => membershipKey(p.membership) !== key);
+    if (!unchanged) state.pending.push({ membership, options });
+    if (!state.pending.length) state.pendingFor = undefined;
+  }
+
+  /** The pending value of a membership option, or undefined when it isn't changed. */
+  function pendingOption(membership: Membership, option: string): boolean | undefined {
+    const key = membershipKey(membership);
+    const p = state.pending.find((x) => membershipKey(x.membership) === key);
+    if (!p || (p.options[option] ?? false) === (membership.options[option] ?? false)) return undefined;
+    return p.options[option];
+  }
+
+  function pendingPlan(): ChangePlan | undefined {
+    if (!state.pending.length || !engine.value || !state.server) return undefined;
+    const changes: MembershipChange[] = state.pending.map((p) => ({ action: "update", membership: p.membership, options: p.options }));
+    return engine.value.planMemberships(changes, state.server);
+  }
+
+  /** Keeps queued edits in line with memberships changed or removed by another change. */
+  function rebasePending() {
+    state.pending = state.pending.flatMap((p) => {
+      const fresh = state.memberships.find((x) => membershipKey(x) === membershipKey(p.membership));
+      if (!fresh) return [];
+      const changed = Object.keys(p.options).some((k) => (p.options[k] ?? false) !== (fresh.options[k] ?? false));
+      return changed ? [{ membership: fresh, options: p.options }] : [];
+    });
+    if (!state.pending.length) state.pendingFor = undefined;
+  }
+
+  function discardPending() {
+    state.pending = [];
+    state.pendingFor = undefined;
+  }
+
+  function reviewPending() {
+    const plan = pendingPlan();
+    if (!plan) return;
+    review(plan);
+    state.review!.fromPending = true;
   }
 
   function openDialog(dialog: Dialog) {
@@ -270,8 +355,10 @@ export function createManager(
       return;
     }
     state.review = undefined;
+    if (current.fromPending) discardPending();
     void host.notifySuccess(`${current.plan.title}: done`);
     await loadList().catch(() => undefined);
+    rebasePending();
     const next = current.plan.selectAfter;
     if (next && state.principals.some((p) => p.id === next)) {
       state.selected = next;
@@ -309,6 +396,12 @@ export function createManager(
     showObject,
     setShowSystem,
     ask,
+    setDebugMode,
+    queueMembership,
+    pendingOption,
+    pendingPlan,
+    discardPending,
+    reviewPending,
     openDialog,
     closeDialog,
     review,

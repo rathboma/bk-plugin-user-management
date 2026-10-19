@@ -247,6 +247,12 @@ describe.skipIf(!url)("PostgreSQL engine against a live server", () => {
         expect.objectContaining({ object: expect.objectContaining({ type: "sequence", name: "order_seq" }), privilege: "USAGE" }),
       ])
     );
+    // What the owner sees: who else holds privileges on its objects.
+    const owner = await postgres.loadDetail(run, server, await principal(server.currentUser));
+    const ordersOwned = owner.owned.find((o) => o.name === "orders");
+    // Column grants (um_alice's UPDATE) live on the columns, not the table.
+    expect(ordersOwned?.grants).toEqual([{ grantee: "um_readers", privileges: ["SELECT"] }]);
+    expect(ordersOwned?.policies).toBe(0);
     const readers = await postgres.loadDetail(run, server, await principal("um_readers"));
     expect(readers.defaultGrants).toEqual([
       expect.objectContaining({ owner: server.currentUser, schema: "app", objectType: "table", privilege: "SELECT", grantee: "um_readers" }),
@@ -328,17 +334,24 @@ describe.skipIf(!url)("PostgreSQL engine against a live server", () => {
   it("diagnoses logins", async () => {
     await postgres.execute(run, await postgres.planCreate(draft("um_dave", { attributes: { login: true, validUntil: "2001-01-01T00:00:00Z" } }), server));
     const dave = await principal("um_dave");
-    const checks = await postgres.diagnoseLogin(run, server, await context(), dave);
-    const byId = Object.fromEntries(checks.map((c) => [c.id, c]));
+    const result = await postgres.diagnoseLogin(run, server, await context(), dave);
+    const byId = Object.fromEntries(result.checks.map((c) => [c.id, c]));
+    expect(result.verdict).toBe("no");
+    expect(result.summary).toMatch(/expired on 2001-01-01/);
+    expect(result.suggestPassword).toBe(true);
     expect(byId.login.status).toBe("ok");
     expect(byId.expiry.status).toBe("fail");
     expect(byId.password.status).toBe("warn");
     expect(byId.databases.detail).toContain(`No CONNECT on ${DB}`);
     expect(byId.databases.fix?.statements[0].sql).toBe(`GRANT CONNECT ON DATABASE ${DB} TO um_dave`);
-    expect(checks.some((c) => c.id.startsWith("hba"))).toBe(true);
+    // The rules that match are grouped under one check.
+    expect(byId.hba.label).toMatch(/pg_hba\.conf · \d+ rules? match/);
+    expect(byId.hba.children?.length).toBeGreaterThan(0);
     // The suggested fix works.
+    expect(result.fixes.map((f) => f.title)).toContain("Remove the expiry");
     await postgres.execute(run, byId.expiry.fix!);
     expect((await principal("um_dave")).attributes.validUntil).toBeNull();
+    expect((await postgres.diagnoseLogin(run, server, await context(), await principal("um_dave"))).checks.find((c) => c.id === "expiry")?.status).toBe("ok");
   });
 
   it("stores role settings, including list values", async () => {

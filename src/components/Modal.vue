@@ -57,9 +57,9 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown, true));
   flex-direction: column;
   width: min(560px, 100%);
   max-height: 88vh;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--panel);
+  background: var(--menu-bg, var(--panel));
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
   outline: none;
 }
@@ -76,8 +76,9 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown, true));
 .modal-head h2 {
   flex: 1;
   margin: 0;
-  font-size: 0.9375rem;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-dark);
 }
 .modal-body {
   padding: 14px 16px;

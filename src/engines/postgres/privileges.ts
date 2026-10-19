@@ -155,14 +155,14 @@ async function privilegeFacts(run: RunQuery, server: ServerInfo, query: FactsQue
   const limit = query.limit ?? LIMIT;
   const list = await rows(
     run,
-    `WITH o AS (${objectsSql(server, query.type, query.filter)} ORDER BY o.schema NULLS FIRST, o.name LIMIT ${limit + 1}),
+    `WITH o AS (${objectsSql(server, query.type, query.filter)} ORDER BY o.schema NULLS FIRST, o.subtype = 'system', o.name LIMIT ${limit + 1}),
           who AS (SELECT oid, rolname FROM pg_roles WHERE ${who})
      SELECT o.schema, o.name, o.signature, o.subtype, ow.rolname AS owner, who.rolname AS role,
          ${checks},
          ${aclJson("o.acl")} AS acl
      FROM o CROSS JOIN who
      LEFT JOIN pg_roles ow ON ow.oid = o.owner
-     ORDER BY o.schema NULLS FIRST, o.name, o.signature, who.rolname`
+     ORDER BY o.schema NULLS FIRST, o.subtype = 'system', o.name, o.signature, who.rolname`
   );
   return { type, list, limit };
 }

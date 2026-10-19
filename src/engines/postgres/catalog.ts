@@ -5,6 +5,7 @@ import type {
   GrantEntry,
   Membership,
   ObjectRef,
+  OwnedObject,
   Principal,
   PrincipalDetail,
   RunQuery,
@@ -13,8 +14,8 @@ import type {
   SettingEntry,
 } from "../types";
 import { PG16 } from "./capabilities";
-import { OBJECT_TYPE_IDS, objectsSql, userSchemaFilter } from "./objects";
-import { bool, num, quoteLiteral, str } from "./sql";
+import { OBJECT_TYPE_IDS, aclJson, objectsSql, userSchemaFilter } from "./objects";
+import { bool, json, num, quoteLiteral, str } from "./sql";
 
 export async function rows(run: RunQuery, sql: string): Promise<Record<string, unknown>[]> {
   const results = await run(sql);
@@ -183,6 +184,21 @@ function objectFrom(row: Record<string, unknown>, type: string): ObjectRef {
   };
 }
 
+/** Privileges on an owned object held by anyone but the owner, grouped by grantee. */
+export function otherGrantees(
+  acl: { grantee: string; privilege: string }[],
+  owner: string
+): { grantee: string; privileges: string[] }[] {
+  const byGrantee = new Map<string, string[]>();
+  for (const item of acl) {
+    if (item.grantee === owner) continue;
+    if (!byGrantee.has(item.grantee)) byGrantee.set(item.grantee, []);
+    const list = byGrantee.get(item.grantee)!;
+    if (!list.includes(item.privilege)) list.push(item.privilege);
+  }
+  return [...byGrantee.entries()].map(([grantee, privileges]) => ({ grantee, privileges }));
+}
+
 const DEFAULTS_TYPES: Record<string, string> = { r: "table", S: "sequence", f: "function", T: "type", n: "schema" };
 
 const OWNED_LIMIT = 500;
@@ -212,7 +228,8 @@ export async function loadDetail(run: RunQuery, server: ServerInfo, principal: P
     WHERE att.attacl IS NOT NULL AND NOT att.attisdropped AND a.grantee = ${roleOid}`;
 
   const ownedSql = OBJECT_TYPE_IDS.map(
-    (type) => `SELECT '${type}' AS type, o.schema, o.name, o.signature, o.subtype
+    (type) => `SELECT '${type}' AS type, o.schema, o.name, o.signature, o.subtype, ${aclJson("o.acl")} AS acl,
+        ${type === "table" ? "(SELECT count(*) FROM pg_policy p WHERE p.polrelid = o.oid)" : "0"} AS policies
       FROM (${objectsSql(server, type)}) o WHERE o.owner = ${roleOid}${
         // Built-in languages and tablespaces belong to the bootstrap superuser.
         type === "database" ? "" : " AND o.oid >= 16384"
@@ -274,7 +291,13 @@ export async function loadDetail(run: RunQuery, server: ServerInfo, principal: P
     principal,
     grants: grantEntries,
     defaultGrants,
-    owned: owned.slice(0, OWNED_LIMIT).map((row) => objectFrom(row, String(row.type))),
+    owned: owned.slice(0, OWNED_LIMIT).map(
+      (row): OwnedObject => ({
+        ...objectFrom(row, String(row.type)),
+        grants: otherGrantees(json<{ grantee: string; privilege: string }[]>(row.acl, []), principal.name),
+        policies: num(row.policies) ?? 0,
+      })
+    ),
     ownedTruncated: owned.length > OWNED_LIMIT,
     settings: settings.map((row): SettingEntry => {
       const text = String(row.setting);
